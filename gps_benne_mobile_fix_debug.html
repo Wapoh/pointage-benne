@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Pointage Benne — Mobile (Fix + Debug)</title>
+<meta name="theme-color" content="#0b57d0"/>
+<style>
+  :root{--brand:#0b57d0}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f5f7fb;color:#0f172a}
+  header{position:sticky;top:0;background:var(--brand);color:#fff;padding:14px 16px}
+  main{padding:16px;max-width:720px;margin:auto}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;margin:12px 0}
+  label{display:block;margin:10px 0 6px;font-weight:700}
+  input[type=text]{width:100%;padding:14px;border:1px solid #cbd5e1;border-radius:12px;font-size:16px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  button{padding:14px 18px;border-radius:14px;border:1px solid #e5e7eb;background:#0b57d0;color:#fff;font-weight:700;font-size:16px;flex:1}
+  button.secondary{background:#0f172a}
+  #toast{position:fixed;top:12px;right:12px;padding:12px 14px;border-radius:14px;font-weight:700;color:#fff;display:none;z-index:10001}
+  #toast.ok{background:#16a34a} #toast.warn{background:#f59e0b} #toast.err{background:#ef4444}
+  #debug{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#111;border:1px dashed #94a3b8;background:#f8fafc;border-radius:10px;padding:10px;display:none}
+  #hot{position:fixed;top:0;left:0;width:44px;height:44px;background:transparent;z-index:10000}
+  #settings{display:none;position:fixed;top:12px;right:12px;width:min(96vw,520px);max-height:85vh;overflow:auto;background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;z-index:9998;box-shadow:0 10px 30px rgba(0,0,0,.15)}
+</style>
+</head>
+<body>
+<header>
+  <h1 style="margin:0;font-size:20px">📍 Pointage Benne</h1>
+</header>
+
+<div id="toast"></div>
+<div id="hot" title="Triple-clic pour paramètres"></div>
+<div id="settings" class="card">
+  <h3 style="margin-top:0">⚙️ Paramètres (Endpoint)</h3>
+  <label for="endpoint">Endpoint (URL /exec)</label>
+  <input id="endpoint" type="text" placeholder="https://script.google.com/macros/s/.../exec"/>
+  <div class="row" style="margin-top:12px">
+    <button type="button" class="secondary" onclick="pingEndpoint()">📡 Tester</button>
+    <button type="button" onclick="saveEndpoint()">💾 Enregistrer</button>
+    <button type="button" onclick="toggleSettings(false)">❌ Fermer</button>
+  </div>
+</div>
+
+<main>
+  <div class="card">
+    <label for="driver">Nom du conducteur</label>
+    <input id="driver" type="text" autocomplete="name" placeholder="ex. Dupont Jean"/>
+    <label for="bin">ID de la benne</label>
+    <input id="bin" type="text" placeholder="ex. BENNE-123"/>
+    <label for="plaque">Plaque / Tournée</label>
+    <input id="plaque" type="text" placeholder="ex. AB-123-CD ou Tournée 5"/>
+    <div class="row" style="margin-top:12px">
+      <button type="button" onclick="saveIdentityAndPoint()">💾 Enregistrer & pointer</button>
+      <button type="button" class="secondary" onclick="flushQueue()">📤 Retenter envois</button>
+    </div>
+    <div id="debug"></div>
+  </div>
+</main>
+
+<script>
+const DEFAULT_ENDPOINT = "https://script.google.com/macros/s/AKfycbwcCrLFhTPcT2NhtLPe1d7UwX2yNHaXEVp89cYEodktviQaB0CDGRbvGFXxXXTxHnM6/exec";
+const CFG_KEY="gps_cfg_mobile_fix", ID_KEY="gps_id_mobile_fix", Q_KEY="gps_q_mobile_fix", OFF_KEY="gps_off_mobile_fix";
+
+function debug(msg){ const el=document.getElementById('debug'); el.style.display='block'; try{ el.textContent += (typeof msg==='string'?msg:JSON.stringify(msg,null,2))+"\n"; }catch(e){ el.textContent += String(msg)+"\n"; } }
+function toast(msg,kind){ const t=document.getElementById('toast'); t.textContent=msg; t.className=kind||''; t.style.display='block'; setTimeout(()=>t.style.display='none', 3000); }
+
+// Triple click for settings
+let clicks=0, timer=null;
+document.getElementById('hot').addEventListener('click',()=>{ clicks++; if(timer) clearTimeout(timer); timer=setTimeout(()=>clicks=0,600); if(clicks>=3){ clicks=0; toggleSettings(true); }});
+function toggleSettings(show){ document.getElementById('settings').style.display = show?'block':'none'; if(show){ loadEndpoint(false);}}
+
+// Config
+function loadCfg(){ try{const r=localStorage.getItem(CFG_KEY); if(r) return JSON.parse(r);}catch(e){debug(e)} return {endpoint: DEFAULT_ENDPOINT}; }
+function saveCfg(cfg){ localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }
+function loadEndpoint(to){ document.getElementById('endpoint').value = loadCfg().endpoint || ''; if(to) toast('Endpoint chargé','ok'); }
+function saveEndpoint(){ const ep=(document.getElementById('endpoint').value||'').trim(); if(!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9\-_]+\/exec$/.test(ep)){ toast('Endpoint invalide','err'); return; } saveCfg({endpoint:ep}); toast('Endpoint enregistré','ok'); }
+async function pingEndpoint(){ const ep=loadCfg().endpoint; try{ await fetch(ep+'?ping='+Date.now(), {mode:'no-cors'}); toast('Endpoint joignable','ok'); }catch(e){ toast('Endpoint KO','err'); debug(e); }}
+
+// Identity
+function loadIdentity(){ let o={driver_name:'',bin_id:'',plaque:''}; try{const r=localStorage.getItem(ID_KEY); if(r) o=JSON.parse(r);}catch(e){debug(e)}; driver.value=o.driver_name||''; bin.value=o.bin_id||''; plaque.value=o.plaque||''; }
+async function saveIdentityAndPoint(){ try{ const driver_name=(driver.value||'').trim(); const bin_id=(bin.value||'').trim(); const p=(plaque.value||'').trim(); if(!driver_name||!bin_id){ toast('Nom + Benne requis','err'); return; } localStorage.setItem(ID_KEY, JSON.stringify({driver_name,bin_id,plaque:p})); await captureAndSend(); }catch(e){ debug(e); toast('Erreur bouton','err'); }}
+
+// Offline queue
+function loadQ(){ try{return JSON.parse(localStorage.getItem(Q_KEY)||'[]')}catch(e){debug(e); return [];} }
+function saveQ(q){ localStorage.setItem(Q_KEY, JSON.stringify(q)); }
+function appendOffline(payload){ try{ const prev = localStorage.getItem(OFF_KEY)||""; localStorage.setItem(OFF_KEY, prev+JSON.stringify(payload)+"\n"); }catch(e){ debug(e); } }
+async function flushQueue(){ const ep=loadCfg().endpoint; let q=loadQ(); if(q.length===0){ toast('Rien à envoyer','ok'); return; } let ok=0,fail=0; for(const item of [...q]){ try{ const body=new URLSearchParams(Object.entries(item).map(([k,v])=>[k,String(v??'')])); const r=await fetch(ep,{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body}); if(!(r.ok||r.type==='opaque')) throw new Error('HTTP '+(r.status||'opaque')); ok++; q.shift(); saveQ(q); await new Promise(r=>setTimeout(r,150)); }catch(e){ fail++; debug(e); await new Promise(r=>setTimeout(r,250)); } } toast(`Flush: ${ok} envoyés, ${fail} échecs`, fail?'warn':'ok'); }
+
+// Geocode
+async function reverseGeocode(lat,lon){ try{ const url=`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${{encodeURIComponent(lat)}}&lon=${{encodeURIComponent(lon)}}&zoom=18&addressdetails=1&accept-language=fr`; const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error('geocode '+r.status); const j=await r.json(); return j.display_name||''; }catch(e){ debug(e); return ''; }}
+
+// Capture & send
+async function captureAndSend(){
+  try{
+    if(location.protocol!=='https:'){ toast('Page non-HTTPS : géoloc bloquée', 'err'); debug('Non HTTPS'); return; }
+    const cfg=loadCfg(); const ep=cfg.endpoint;
+    if(!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9\-_]+\/exec$/.test(ep)){ toast('Endpoint invalide','err'); debug(ep); return; }
+    if(!navigator.geolocation){ toast('GPS non supporté','err'); return; }
+
+    toast('📍 GPS…','ok');
+    const pos = await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{enableHighAccuracy:true,timeout:20000,maximumAge:0}));
+    const lat=pos.coords.latitude, lon=pos.coords.longitude;
+    debug({lat,lon});
+    toast('🧭 Adresse…','ok');
+    const address = await reverseGeocode(lat,lon);
+
+    const id=JSON.parse(localStorage.getItem(ID_KEY)||'{}');
+    const payload = { driver_name: id.driver_name, bin_id: id.bin_id, plaque: id.plaque||'', address, latitude:String(lat), longitude:String(lon) };
+    debug(payload);
+
+    const body = new URLSearchParams(Object.entries(payload).map(([k,v])=>[k,String(v??'')]));
+    const r = await fetch(ep, { method:'POST', mode:'no-cors', headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'}, body });
+    toast('✅ Pointage enregistré', 'ok'); // opaque => on considère ok
+  }catch(e){
+    debug(e);
+    toast('Hors-ligne — stocké', 'warn');
+    try{
+      const id=JSON.parse(localStorage.getItem(ID_KEY)||'{}');
+      if(typeof lat!=='undefined' && typeof lon!=='undefined'){
+        const address = await reverseGeocode(lat,lon).catch(()=> '');
+        const p={ driver_name:id.driver_name, bin_id:id.bin_id, plaque:id.plaque||'', address, latitude:String(lat), longitude:String(lon) };
+        const q=loadQ(); q.push(p); saveQ(q); appendOffline(p);
+      }
+    }catch(ex){ debug(ex); }
+  }
+}
+
+// Init
+document.addEventListener('DOMContentLoaded', ()=>{ try{ loadIdentity(); loadEndpoint(false); if(location.protocol!=='https:') toast('⚠️ Ouvre en HTTPS', 'warn'); }catch(e){ debug(e); }});
+</script>
+</body>
+</html>
